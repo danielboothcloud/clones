@@ -43,6 +43,3 @@ active_statuses: In Progress, In Review, To Do, Pending
 
 When enabled, local repos show Jira ticket labels extracted from branch names (e.g. `feature/PROJ-123` shows `[PROJ-123]`). The JQL filter controls which tickets are displayed. Set `enabled: false` or remove the file to disable.
 
-## License
-
-MIT

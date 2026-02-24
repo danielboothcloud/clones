@@ -1,4 +1,4 @@
-module github.com/yourusername/clone
+module github.com/danielboothcloud/clones
 
 go 1.21
 
