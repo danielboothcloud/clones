@@ -1,7 +1,7 @@
 # clones
 
 Interactive CLI for cloning and managing Git repos from GitHub and GitLab. Uses `fzf` for fuzzy finding, NutsDB for caching, and optional Jira integration for ticket labels.
-![clones demo](assets/screenshot.png)
+<img src="assets/screenshot.png" alt="clones demo" width="304">
 
 ## Install
 
