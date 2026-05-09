@@ -79,14 +79,15 @@ func loadReposFromDB(platform string) []Repository {
 		fmt.Fprintf(os.Stderr, "Warning: could not begin tx: %v\n", err)
 		return []Repository{}
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var bucket string
-	if platform == "github" {
+	switch platform {
+	case "github":
 		bucket = bucketGitHub
-	} else if platform == "gitlab" {
+	case "gitlab":
 		bucket = bucketGitLab
-	} else {
+	default:
 		return []Repository{}
 	}
 
@@ -118,24 +119,25 @@ func saveReposToDB(platform string, repos []Repository) error {
 	}
 
 	var bucket string
-	if platform == "github" {
+	switch platform {
+	case "github":
 		bucket = bucketGitHub
-	} else if platform == "gitlab" {
+	case "gitlab":
 		bucket = bucketGitLab
-	} else {
-		tx.Rollback()
+	default:
+		_ = tx.Rollback()
 		return fmt.Errorf("unknown platform: %s", platform)
 	}
 
 	if err := tx.NewBucket(nutsdb.DataStructureBTree, bucket); err != nil {
 		if !strings.Contains(err.Error(), "bucket already exists") && !strings.Contains(err.Error(), "already exist") {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
 		}
 	}
 	if err := tx.NewBucket(nutsdb.DataStructureBTree, bucketMeta); err != nil {
 		if !strings.Contains(err.Error(), "bucket already exists") && !strings.Contains(err.Error(), "already exist") {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("failed to create bucket %s: %w", bucketMeta, err)
 		}
 	}
@@ -170,7 +172,7 @@ func isBatchStale(platform string) bool {
 	if err != nil {
 		return false
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	timestampKey := fmt.Sprintf("%s:batch_timestamp", platform)
 	value, err := tx.Get(bucketMeta, []byte(timestampKey))

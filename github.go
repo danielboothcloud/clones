@@ -82,7 +82,7 @@ func fetchGitHubPage(page int, token string) []Repository {
 	resp, err := doRequest(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		return nil
 	}
@@ -97,8 +97,8 @@ func fetchGitHubPage(page int, token string) []Repository {
 		Stars       int                    `json:"stargazers_count"`
 	}
 
-	json.NewDecoder(resp.Body).Decode(&repos)
-	resp.Body.Close()
+	_ = json.NewDecoder(resp.Body).Decode(&repos)
+	_ = resp.Body.Close()
 
 	var result []Repository
 	for _, r := range repos {
@@ -150,7 +150,7 @@ func searchGitHubPage(query string, page int, token string) []Repository {
 	resp, err := doRequest(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		return nil
 	}
@@ -167,8 +167,8 @@ func searchGitHubPage(query string, page int, token string) []Repository {
 		} `json:"items"`
 	}
 
-	json.NewDecoder(resp.Body).Decode(&result)
-	resp.Body.Close()
+	_ = json.NewDecoder(resp.Body).Decode(&result)
+	_ = resp.Body.Close()
 
 	var repos []Repository
 	for _, r := range result.Items {

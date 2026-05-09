@@ -58,7 +58,7 @@ func selectRepoWithFzf(repoChan <-chan Repository) *Repository {
 	var mu sync.Mutex
 
 	go func() {
-		defer stdin.Close()
+		defer func() { _ = stdin.Close() }()
 		for repo := range repoChan {
 			mu.Lock()
 			repos = append(repos, repo)
@@ -66,11 +66,12 @@ func selectRepoWithFzf(repoChan <-chan Repository) *Repository {
 
 			var platformTag, color string
 			if repo.LocalPath != "" {
-				if repo.Platform == "github" {
+				switch repo.Platform {
+				case "github":
 					platformTag, color = "[Local: GitHub]", "\033[32m"
-				} else if repo.Platform == "gitlab" {
+				case "gitlab":
 					platformTag, color = "[Local: GitLab]", "\033[32m"
-				} else {
+				default:
 					platformTag, color = "[Local]", "\033[32m"
 				}
 			} else {
@@ -112,7 +113,7 @@ func selectRepoWithFzf(repoChan <-chan Repository) *Repository {
 			line := fmt.Sprintf("%s%s\033[0m %s\t%d\t%s\t%s\t%s\n",
 				color, platformTag, repoName,
 				repo.Stars, repo.Language, repo.Description, repo.Platform)
-			stdin.Write([]byte(line))
+			_, _ = stdin.Write([]byte(line))
 		}
 	}()
 
@@ -202,16 +203,16 @@ func selectBranchWithFzf(repo *Repository, defaultBranch string) string {
 	resp, err := doRequest(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		return defaultBranch
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var branches []struct {
 		Name string `json:"name"`
 	}
-	json.NewDecoder(resp.Body).Decode(&branches)
+	_ = json.NewDecoder(resp.Body).Decode(&branches)
 
 	if len(branches) == 0 {
 		return defaultBranch
@@ -228,11 +229,12 @@ func selectBranchWithFzf(repo *Repository, defaultBranch string) string {
 	var otherBranches []string
 
 	for _, name := range branchNames {
-		if name == "main" {
+		switch name {
+		case "main":
 			hasMain = true
-		} else if name == "master" {
+		case "master":
 			hasMaster = true
-		} else {
+		default:
 			otherBranches = append(otherBranches, name)
 		}
 	}

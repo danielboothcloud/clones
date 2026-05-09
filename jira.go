@@ -70,11 +70,11 @@ func fetchJiraTicket(ticketID string) *JiraTicket {
 	resp, err := doRequest(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		return nil
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var ticket JiraTicket
 	if err := json.NewDecoder(resp.Body).Decode(&ticket); err != nil {
@@ -156,11 +156,11 @@ func loadJiraTicketsByJQL(jql string) JiraJQLResult {
 	resp, err := doRequest(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		return JiraJQLResult{}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		Issues []JiraTicket `json:"issues"`

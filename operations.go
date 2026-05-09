@@ -145,12 +145,12 @@ func executeCheckout(repo *Repository) {
 
 	for _, branch := range uniqueBranches {
 		if branch == currentBranch {
-			stdin.Write([]byte(fmt.Sprintf("\033[32m* %s\033[0m\n", branch)))
+			_, _ = fmt.Fprintf(stdin, "\033[32m* %s\033[0m\n", branch)
 		} else {
-			stdin.Write([]byte(branch + "\n"))
+			_, _ = stdin.Write([]byte(branch + "\n"))
 		}
 	}
-	stdin.Close()
+	_ = stdin.Close()
 
 	output, err = io.ReadAll(stdout)
 	if err != nil {
@@ -215,8 +215,8 @@ func executeDelete(repo *Repository) {
 		os.Exit(1)
 	}
 
-	stdin.Write([]byte("yes\nno\n"))
-	stdin.Close()
+	_, _ = stdin.Write([]byte("yes\nno\n"))
+	_ = stdin.Close()
 
 	output, err := io.ReadAll(stdout)
 	if err != nil {
@@ -363,9 +363,9 @@ func performLocalOperation(repo *Repository) {
 	}
 
 	for _, op := range operations {
-		stdin.Write([]byte(op + "\n"))
+		_, _ = stdin.Write([]byte(op + "\n"))
 	}
-	stdin.Close()
+	_ = stdin.Close()
 
 	output, err := io.ReadAll(stdout)
 	if err != nil {

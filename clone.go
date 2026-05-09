@@ -37,16 +37,16 @@ func getDefaultBranch(repo *Repository) string {
 	resp, err := doRequest(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 		}
 		return "main"
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var result struct {
 		DefaultBranch string `json:"default_branch"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	_ = json.NewDecoder(resp.Body).Decode(&result)
 
 	if result.DefaultBranch == "" {
 		return "main"
@@ -80,7 +80,7 @@ func cloneOrUpdate(repo *Repository, branch string) string {
 				trackCmd.Dir = targetDir
 				trackCmd.Stdout = nil
 				trackCmd.Stderr = os.Stderr
-				trackCmd.Run()
+				_ = trackCmd.Run()
 			}
 		}
 
@@ -88,12 +88,15 @@ func cloneOrUpdate(repo *Repository, branch string) string {
 		cmd.Dir = targetDir
 		cmd.Stdout = nil
 		cmd.Stderr = os.Stderr
-		cmd.Run()
+		_ = cmd.Run()
 
 		return targetDir
 	}
 
-	os.MkdirAll(filepath.Dir(targetDir), 0755)
+	if err := os.MkdirAll(filepath.Dir(targetDir), 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "✗ Failed to create parent directory: %v\n", err)
+		os.Exit(1)
+	}
 
 	cmd := exec.Command("git", "clone", "-b", branch, cloneURL(repo), targetDir)
 	cmd.Stdout = nil

@@ -58,7 +58,7 @@ func doRequest(req *http.Request) (*http.Response, error) {
 				wait = time.Duration(secs) * time.Second
 			}
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		time.Sleep(wait)
 		backoff *= 2
 	}
