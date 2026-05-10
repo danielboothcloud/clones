@@ -38,9 +38,26 @@ type Config struct {
 
 // Settings holds platform-level user configuration loaded from clones.yml + env vars.
 type Settings struct {
-	GitHubHost    string // default "github.com" — supports GitHub Enterprise Server
-	GitLabHost    string // default "gitlab.com" — supports self-hosted instances
-	CloneProtocol string // "ssh" (default) or "https"
+	GitHubHost    string        // default "github.com" — supports GitHub Enterprise Server
+	GitLabHost    string        // default "gitlab.com" — supports self-hosted instances
+	CloneProtocol string        // "ssh" (default) or "https"
+	CloneRoot     string        // root directory for clones; default ~/projects/work
+	Remote        *RemoteConfig // when non-nil, designated ops run via SSH on a remote host
+}
+
+// RemoteConfig configures running selected operations on a remote host via SSH.
+// Useful when CloneRoot lives on a network/userspace filesystem (fuse-t, NFS, sshfs)
+// that struggles with rapid file mutation — git clone, rm -rf, etc. run faster and more
+// reliably when executed natively on the host that backs the mount.
+//
+// Path mapping: a local path under CloneRoot maps to the remote by stripping CloneRoot
+// and prepending Path. Example: CloneRoot=/Users/x/bluefin/work, Path=/home/x/work,
+// local /Users/x/bluefin/work/foo/bar → remote /home/x/work/foo/bar.
+type RemoteConfig struct {
+	Host               string   // ssh alias / hostname — must be resolvable (typically via ~/.ssh/config)
+	Path               string   // absolute path on the remote that corresponds to CloneRoot locally
+	Ops                []string // whitelist of operation names to run remotely (e.g. clone, delete, pull, push, checkout)
+	SyncTimeoutSeconds int      // how long to wait for the local mount to see a remotely-cloned dir; default 5
 }
 
 // JiraConfig holds user configuration for Jira integration

@@ -110,10 +110,14 @@ func selectRepoWithFzf(repoChan <-chan Repository) *Repository {
 				}
 			}
 
+			// Strip embedded newlines and tabs from API-supplied fields. Newlines would
+			// terminate the row early (causing gaps + orphan "bleeding" rows in fzf), and
+			// tabs would shift later columns out of position for the awk preview.
 			line := fmt.Sprintf("%s%s\033[0m %s\t%d\t%s\t%s\t%s\n",
 				color, platformTag, repoName,
-				repo.Stars, repo.Language, repo.Description, repo.Platform)
-			_, _ = stdin.Write([]byte(line))
+				repo.Stars, sanitizeFzfField(repo.Language), sanitizeFzfField(repo.Description), repo.Platform)
+			// stdin is fzf's input pipe — fzf treats it as data rows to filter, not as commands.
+			_, _ = stdin.Write([]byte(line)) // nosemgrep: go.lang.security.audit.dangerous-command-write.dangerous-command-write
 		}
 	}()
 
@@ -141,6 +145,18 @@ func selectRepoWithFzf(repoChan <-chan Repository) *Repository {
 	}
 
 	return nil
+}
+
+// sanitizeFzfField makes a string safe to embed inside a tab-delimited fzf row:
+// newlines (\n, \r) would split a row into multiple bogus entries, and tabs would
+// shift later columns out of position for the awk preview. Replaced with spaces
+// so search still finds the words.
+func sanitizeFzfField(s string) string {
+	if s == "" {
+		return s
+	}
+	r := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ")
+	return r.Replace(s)
 }
 
 // parseFzfRowOwnerName extracts owner/name from a row that fzf wrote out as the user's

@@ -161,7 +161,7 @@ func getAllBranches(repoPath string) []string {
 	return result
 }
 
-// findLocalRepos walks ~/projects/work looking for git repositories
+// findLocalRepos walks the configured clone root looking for git repositories
 func findLocalRepos(filter string, ch chan<- Repository) {
 	jiraConfig, err := loadJiraConfig()
 	if err != nil {
@@ -176,13 +176,7 @@ func findLocalRepos(filter string, ch chan<- Repository) {
 		jql = loadJiraTicketsByJQL(jiraConfig.JQL)
 	}
 
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "✗ Could not get home directory: %v\n", err)
-		return
-	}
-
-	workDir := filepath.Join(homeDir, "projects", "work")
+	workDir := getSettings().CloneRoot
 
 	if _, err := os.Stat(workDir); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "✗ Directory does not exist: %s\n", workDir)

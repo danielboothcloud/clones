@@ -55,7 +55,35 @@ clones --no-cache            # bypass NutsDB cache
 clones --jira                # only repos with active Jira tickets
 ```
 
-Repos clone to `~/projects/work/<owner>/<repo>`.
+Repos clone to `~/projects/<owner>/<repo>` by default (configurable — see Settings).
+
+## Settings
+
+Optional. Create `~/.config/clones/clones.yml`:
+
+```yaml
+github_host: github.com           # GitHub Enterprise: ghe.example.com
+gitlab_host: gitlab.com           # self-hosted GitLab: gitlab.example.com
+clone_protocol: ssh               # ssh or https
+clone_root: ~/projects            # where repos are cloned
+
+# Optional: run heavy git ops on a remote host (useful when clone_root
+# lives on a fuse-t / sshfs / NFS mount that struggles with pack churn).
+remote:
+  host: bluefin-vm                # ssh alias (must be in ~/.ssh/config or resolvable)
+  path: /var/home/you/projects    # absolute path on the remote that backs clone_root
+  ops:                            # which ops to dispatch via SSH
+    - clone
+    - delete
+    - pull
+    - push
+    - checkout
+  sync_timeout_seconds: 5         # how long to wait for the local mount to see remote changes
+```
+
+Env var overrides: `GITHUB_HOST`, `GITLAB_HOST`, `CLONES_PROTOCOL`, `CLONES_ROOT`.
+
+When `remote:` is configured, ops listed in `ops:` execute via `ssh <host> <cmd>` instead of locally. Read-only ops (`cd`, `edit`, `jiraopen`, `jirastatus`) always run locally.
 
 ## Cache
 
