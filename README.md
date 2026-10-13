@@ -51,7 +51,7 @@ clones terraform             # filter by name
 clones -l                    # local repos only (cd, pull, push, delete, edit)
 clones -r                    # remote repos only
 clones --platform gitlab     # single platform
-clones --no-cache            # bypass NutsDB cache
+clones --no-cache            # force a local rescan and fresh remote API data
 clones --jira                # only repos with active Jira tickets
 ```
 
@@ -87,7 +87,18 @@ When `remote:` is configured, ops listed in `ops:` execute via `ssh <host> <cmd>
 
 ## Cache
 
-Repos are cached in NutsDB at `~/.cache/clones/db/` with 24h TTL. Stale cache is served instantly while a background refresh runs for next time.
+Remote repos are cached in NutsDB at `~/.cache/clones/db/` with 24h TTL. Stale cache is served instantly while a background refresh runs for next time.
+
+Local repos (including branch, dirty/unpushed indicators, and Jira labels) are cached
+for one minute in the same NutsDB database. Repeat runs, including `clones -l`, skip
+the directory walk, Git commands, and Jira requests. Filters are applied to the
+cached list, so changing the search or platform doesn't rescan. The snapshot refreshes
+after expiry (one minute) or a clone-root/Jira config change. Clone, pull, push,
+checkout, and delete operations performed by `clones` invalidate it immediately — if
+another `clones` launch holds the database at that moment, the invalidation retries
+briefly and otherwise lets the snapshot expire within its one-minute lifetime. Changes
+made outside `clones` may take up to one minute to appear; use `clones -l --no-cache`
+for an immediate rescan.
 
 ## Exclude Patterns
 

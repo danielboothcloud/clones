@@ -27,7 +27,7 @@ type CliArgs struct {
 	RemoteOnly bool
 	Platform   string // "github", "gitlab", or "" for all
 	Filter     string
-	NoCache    bool // Bypass cache and fetch fresh data from APIs
+	NoCache    bool // Bypass cache, rescan local repos, and fetch fresh data from APIs
 	JiraFilter bool // Filter repos with active Jira tickets
 }
 

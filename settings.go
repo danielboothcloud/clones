@@ -110,6 +110,14 @@ func getSettings() *Settings {
 			s.CloneRoot = expandTilde(v)
 		}
 
+		// Everything downstream compares or joins against CloneRoot (local listings,
+		// cache keys, remote path mapping, cleanup), so normalize it once. A relative
+		// value (bare CLONES_ROOT env var, or the unresolvable-home fallback) would
+		// break filepath.Rel once walk results are absolute.
+		if abs, absErr := filepath.Abs(s.CloneRoot); absErr == nil {
+			s.CloneRoot = abs
+		}
+
 		cachedSettings = s
 	})
 	return cachedSettings

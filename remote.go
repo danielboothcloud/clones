@@ -70,6 +70,7 @@ func sshExec(commandLine string) error {
 // based on whether `op` is in the remote-ops whitelist. Streams output to stderr and
 // returns the underlying command's exit status.
 func runGitInRepo(op string, localRepoPath string, gitArgs ...string) error {
+	invalidateLocalReposCache()
 	if shouldRunRemote(op) {
 		remotePath, err := toRemotePath(localRepoPath)
 		if err != nil {
@@ -92,6 +93,7 @@ func runGitInRepo(op string, localRepoPath string, gitArgs ...string) error {
 // runRemove deletes the repo path either via local os.RemoveAll or remote `rm -rf`.
 // `op` must be the operation name to gate against remote.ops (typically "delete").
 func runRemove(op string, localRepoPath string) error {
+	invalidateLocalReposCache()
 	if shouldRunRemote(op) {
 		remotePath, err := toRemotePath(localRepoPath)
 		if err != nil {
@@ -106,6 +108,7 @@ func runRemove(op string, localRepoPath string) error {
 // the remote (with the path translated). Ensures the parent directory exists in the
 // chosen location.
 func runClone(op string, localTarget, branch, url string) error {
+	invalidateLocalReposCache()
 	if shouldRunRemote(op) {
 		remoteTarget, err := toRemotePath(localTarget)
 		if err != nil {
