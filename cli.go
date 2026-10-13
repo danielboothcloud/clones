@@ -18,6 +18,7 @@ OPTIONS:
   --platform <name>      Filter by platform: github or gitlab
   --jira                 Show only repos with active Jira tickets
   --no-cache             Bypass cache and rescan local repos / fetch from APIs
+  -v, --version          Show version
   -h, --help             Show this help message
 
 EXAMPLES:
@@ -31,6 +32,7 @@ EXAMPLES:
   clones -l --jira              # Only local repos with active Jira tickets
   clones -l --no-cache          # Force a fresh local scan
   clones --no-cache             # Force local scan and API refresh (bypass cache)
+  clones --version              # Show version
 `
 
 // parseArgs uses stdlib flag with two carry-over conventions from the
@@ -83,6 +85,8 @@ func parseArgs() CliArgs {
 	fs.BoolVar(&args.RemoteOnly, "remote", false, "browse remote repos only")
 	fs.BoolVar(&args.NoCache, "no-cache", false, "bypass cache")
 	fs.BoolVar(&args.JiraFilter, "jira", false, "only repos with active Jira tickets")
+	fs.BoolVar(&args.Version, "v", false, "show version")
+	fs.BoolVar(&args.Version, "version", false, "show version")
 	fs.StringVar(&args.Platform, "platform", "", "github|gitlab")
 
 	if err := fs.Parse(rest); err != nil {

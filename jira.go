@@ -1,14 +1,18 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nutsdb/nutsdb"
 )
 
 // Jira ticket pattern: PROJECT-123 (case insensitive: letters, hyphen, numbers)
@@ -110,35 +114,56 @@ type JiraJQLResult struct {
 }
 
 var (
-	jiraJQLCache    = make(map[string]JiraJQLResult)
-	jiraJQLCacheMu  sync.RWMutex
-	jiraJQLCacheAt  = make(map[string]time.Time)
-	jiraJQLCacheTTL = 15 * time.Minute
+	// In-process L1 for JQL results, keyed by the composite DB cache key
+	// (email|baseURL|jql) so different instances/identities never cross-pollute.
+	jiraJQLCache   = make(map[string]JiraJQLResult)
+	jiraJQLCacheMu sync.RWMutex
+	jiraJQLCacheAt = make(map[string]time.Time)
+
+	// jiraJQLCacheTTL is how long a JQL result stays fresh — one hour, both in
+	// process memory (L1) and in NutsDB (L2). Jira labels in listings can
+	// therefore lag reality by up to an hour; --no-cache goes live.
+	jiraJQLCacheTTL = time.Hour
 )
 
 // loadJiraTicketsByJQL searches for tickets using JQL and returns the full ticket data
 // (summary + status), so callers don't need a follow-up per-ticket fetch.
-// Results are cached for 15 minutes.
+// Lookup chain: in-process cache (L1) → NutsDB (L2) → live API; successful
+// fetches write both layers. noCache skips both layers (and re-fetches live)
+// so `clones --no-cache` means fresh data everywhere.
 //
 // Returns OK=false (and an empty map) when JQL is empty, when Jira config is missing,
 // or when the API call fails. Callers should branch on OK rather than len(Tickets).
-func loadJiraTicketsByJQL(jql string) JiraJQLResult {
+func loadJiraTicketsByJQL(jql string, noCache bool) JiraJQLResult {
 	if jql == "" {
 		return JiraJQLResult{}
 	}
 
-	jiraJQLCacheMu.RLock()
-	if cached, exists := jiraJQLCache[jql]; exists {
-		if at, ok := jiraJQLCacheAt[jql]; ok && time.Since(at) < jiraJQLCacheTTL {
-			jiraJQLCacheMu.RUnlock()
-			return cached
-		}
-	}
-	jiraJQLCacheMu.RUnlock()
-
 	token, baseURL, email := getJiraConfig()
 	if token == "" || baseURL == "" {
 		return JiraJQLResult{}
+	}
+	cacheKey := jiraJQLCacheKey(email, baseURL, jql)
+
+	if !noCache {
+		jiraJQLCacheMu.RLock()
+		if cached, exists := jiraJQLCache[cacheKey]; exists {
+			if at, ok := jiraJQLCacheAt[cacheKey]; ok && time.Since(at) < jiraJQLCacheTTL {
+				jiraJQLCacheMu.RUnlock()
+				return cached
+			}
+		}
+		jiraJQLCacheMu.RUnlock()
+
+		// L2: served from NutsDB so every fresh clones process skips the
+		// Atlassian round trip within the TTL window.
+		if cached, ok := loadJiraJQLFromDB(cacheKey); ok {
+			jiraJQLCacheMu.Lock()
+			jiraJQLCache[cacheKey] = cached
+			jiraJQLCacheAt[cacheKey] = time.Now()
+			jiraJQLCacheMu.Unlock()
+			return cached
+		}
 	}
 
 	apiURL := fmt.Sprintf("%s/rest/api/3/search/jql?jql=%s&fields=summary,status&maxResults=1000",
@@ -178,10 +203,92 @@ func loadJiraTicketsByJQL(jql string) JiraJQLResult {
 
 	out := JiraJQLResult{Tickets: tickets, OK: true}
 
+	// Write-through both layers. Persistence failure is non-fatal: listing
+	// works, next run re-fetches.
 	jiraJQLCacheMu.Lock()
-	jiraJQLCache[jql] = out
-	jiraJQLCacheAt[jql] = time.Now()
+	jiraJQLCache[cacheKey] = out
+	jiraJQLCacheAt[cacheKey] = time.Now()
 	jiraJQLCacheMu.Unlock()
+	if err := saveJiraJQLToDB(cacheKey, out); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not persist Jira JQL cache: %v\n", err)
+	}
 
 	return out
+}
+
+// jiraJQLCacheKey composes the cross-layer JQL cache key from the authenticated
+// identity (email), the instance (baseURL), and the query. The API token is
+// deliberately excluded — results are keyed to identity, not credential, so
+// rotating a token does not blank the cache. Hashed so config values never
+// appear in the on-disk key.
+func jiraJQLCacheKey(email, baseURL, jql string) string {
+	data, _ := json.Marshal(struct {
+		Email   string
+		BaseURL string
+		JQL     string
+	}{email, baseURL, jql})
+	return "jql:" + fmt.Sprintf("%x", sha256.Sum256(data))
+}
+
+// jiraJQLDBSnapshot is the persisted form of a JQL result (bucketMeta).
+type jiraJQLDBSnapshot struct {
+	SavedAt time.Time              `json:"saved_at"`
+	Tickets map[string]*JiraTicket `json:"tickets"`
+}
+
+// loadJiraJQLFromDB returns the persisted result for cacheKey when it exists
+// and is younger than jiraJQLCacheTTL. Any storage problem is a miss — the
+// caller falls back to the live API, which is always safe.
+func loadJiraJQLFromDB(cacheKey string) (JiraJQLResult, bool) {
+	db, err := getCacheDB()
+	if err != nil {
+		return JiraJQLResult{}, false
+	}
+	tx, err := db.Begin(false)
+	if err != nil {
+		return JiraJQLResult{}, false
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	value, err := tx.Get(bucketMeta, []byte(cacheKey))
+	if err != nil {
+		return JiraJQLResult{}, false
+	}
+
+	var snapshot jiraJQLDBSnapshot
+	if err := json.Unmarshal(value, &snapshot); err != nil {
+		return JiraJQLResult{}, false
+	}
+	if snapshot.SavedAt.IsZero() || time.Since(snapshot.SavedAt) >= jiraJQLCacheTTL {
+		return JiraJQLResult{}, false
+	}
+	if snapshot.Tickets == nil {
+		snapshot.Tickets = map[string]*JiraTicket{}
+	}
+	return JiraJQLResult{Tickets: snapshot.Tickets, OK: true}, true
+}
+
+// saveJiraJQLToDB persists a successful JQL result under bucketMeta.
+func saveJiraJQLToDB(cacheKey string, result JiraJQLResult) error {
+	value, err := json.Marshal(jiraJQLDBSnapshot{SavedAt: time.Now(), Tickets: result.Tickets})
+	if err != nil {
+		return err
+	}
+	db, err := getCacheDB()
+	if err != nil {
+		return err
+	}
+	tx, err := db.Begin(true)
+	if err != nil {
+		return err
+	}
+	if err := tx.NewBucket(nutsdb.DataStructureBTree, bucketMeta); err != nil && !isBucketExistsErr(err) {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Put(bucketMeta, []byte(cacheKey), value, 0); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }

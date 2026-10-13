@@ -138,21 +138,21 @@ func TestLocalReposCacheRoundTrip(t *testing.T) {
 		JiraTicketID: "DEVOPS-123", JiraTicketIDs: []string{"DEVOPS-123", "DEVOPS-456"},
 		JiraStatus: "In Progress", JiraSummary: "a ticket", HasActiveJiraTicket: true,
 	}}
-	if err := saveLocalReposCache("key", want); err != nil {
+	if err := saveLocalReposCache(0, "key", want); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := loadLocalReposCache("key"); !ok || !reflect.DeepEqual(got, want) {
+	if got, _, ok := loadLocalReposCache("key"); !ok || !reflect.DeepEqual(got, want) {
 		t.Fatalf("round trip: hit=%v got=%+v", ok, got)
 	}
 	// Replacing a populated list with an empty list must not retain old entries.
-	if err := saveLocalReposCache("key", nil); err != nil {
+	if err := saveLocalReposCache(0, "key", nil); err != nil {
 		t.Fatal(err)
 	}
-	if got, ok := loadLocalReposCache("key"); !ok || len(got) != 0 {
+	if got, _, ok := loadLocalReposCache("key"); !ok || len(got) != 0 {
 		t.Fatalf("empty list: hit=%v got=%+v", ok, got)
 	}
 	invalidateLocalReposCache()
-	if _, ok := loadLocalReposCache("key"); ok {
+	if _, _, ok := loadLocalReposCache("key"); ok {
 		t.Fatal("invalidated snapshot was still a hit")
 	}
 	// Invalidating when nothing is stored is fine, not an error.
@@ -161,14 +161,13 @@ func TestLocalReposCacheRoundTrip(t *testing.T) {
 
 func TestLocalReposCacheMisses(t *testing.T) {
 	isolateLocalCache(t)
-	if _, ok := loadLocalReposCache("key"); ok {
+	if _, _, ok := loadLocalReposCache("key"); ok {
 		t.Fatal("missing snapshot was a hit")
 	}
 	cases := []struct {
 		name   string
 		mutate func(*localReposSnapshot)
 	}{
-		{"expired", func(s *localReposSnapshot) { s.SavedAt = time.Now().Add(-localCacheTTL) }},
 		{"future timestamp", func(s *localReposSnapshot) { s.SavedAt = time.Now().Add(time.Hour) }},
 		{"missing timestamp", func(s *localReposSnapshot) { s.SavedAt = time.Time{} }},
 		{"wrong version", func(s *localReposSnapshot) { s.Version++ }},
@@ -179,13 +178,13 @@ func TestLocalReposCacheMisses(t *testing.T) {
 			snapshot := localReposSnapshot{Version: localCacheVersion, Key: "key", SavedAt: time.Now()}
 			c.mutate(&snapshot)
 			putLocalReposTestSnapshot(t, snapshot)
-			if _, ok := loadLocalReposCache("key"); ok {
+			if _, _, ok := loadLocalReposCache("key"); ok {
 				t.Fatal("invalid snapshot was a hit")
 			}
 		})
 	}
 	putLocalReposTestValue(t, []byte("{broken"))
-	if _, ok := loadLocalReposCache("key"); ok {
+	if _, _, ok := loadLocalReposCache("key"); ok {
 		t.Fatal("corrupt snapshot was a hit")
 	}
 }
@@ -224,7 +223,7 @@ func TestLocalReposCacheContext(t *testing.T) {
 			if other == key {
 				t.Fatal("Jira environment change did not affect the key")
 			}
-			if err := saveLocalReposCache(other, nil); err != nil {
+			if err := saveLocalReposCache(0, other, nil); err != nil {
 				t.Fatal(err)
 			}
 			raw := string(getLocalReposTestRawValue(t))
@@ -291,7 +290,7 @@ func TestLocalReposCacheInvalidationRetriesWhenLocked(t *testing.T) {
 	}()
 
 	invalidateLocalReposCache() // must retry until the holder releases, then delete
-	if _, ok := loadLocalReposCache("key"); ok {
+	if _, _, ok := loadLocalReposCache("key"); ok {
 		t.Fatal("snapshot survived a successful invalidation")
 	}
 }
@@ -476,17 +475,23 @@ func TestLocalCacheCLIRepeatRunAndRefresh(t *testing.T) {
 	}
 
 	snapshot = getLocalReposTestSnapshot(t)
-	snapshot.SavedAt = time.Now().Add(-localCacheTTL - time.Second)
+	snapshot.SavedAt = time.Now().Add(-localCacheRefreshThreshold - time.Second)
 	putLocalReposTestSnapshot(t, snapshot)
 	if err := os.RemoveAll(gamma); err != nil {
 		t.Fatal(err)
 	}
+	// Serve-stale: the child serves the outdated snapshot instantly (gamma was
+	// deleted on disk but is still listed) while a background refresh rebuilds
+	// from disk and persists before the child exits.
 	rows, _ = runLocalCacheCLI(t, "-l")
-	if strings.Count(rows, "\n") != 2 || localCacheGitCalls(t) <= calls {
-		t.Fatal("expiry did not trigger a rescan")
+	if strings.Count(rows, "\n") != 3 || !strings.Contains(rows, "owner/gamma") {
+		t.Fatalf("stale snapshot was not served instantly: %q", rows)
+	}
+	if localCacheGitCalls(t) <= calls {
+		t.Fatal("stale serve did not run a background refresh")
 	}
 	if fresh := getLocalReposTestSnapshot(t); len(fresh.Repos) != 2 {
-		t.Fatal("expired snapshot was not replaced, keeping deleted repos")
+		t.Fatal("background refresh did not replace the stale snapshot")
 	}
 }
 
@@ -527,7 +532,7 @@ func TestLocalCacheCLILargeMergedSnapshot(t *testing.T) {
 		repos = append(repos, Repository{Owner: "owner", Name: fmt.Sprintf("repo-%d", i), Platform: "github", LocalPath: filepath.Join(root, "owner", fmt.Sprintf("repo-%d", i))})
 	}
 	key := localReposCacheKey(root, &JiraConfig{})
-	if err := saveLocalReposCache(key, repos); err != nil {
+	if err := saveLocalReposCache(0, key, repos); err != nil {
 		t.Fatal(err)
 	}
 	rows, _ := runLocalCacheCLI(t)
@@ -572,19 +577,122 @@ func TestLocalCacheMutationInvalidation(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if err := saveLocalReposCache("key", []Repository{{Name: "old"}}); err != nil {
+			epoch, err := readLocalReposEpoch()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := saveLocalReposCache(epoch, "key", []Repository{{Name: "old"}}); err != nil {
 				t.Fatal(err)
 			}
 			if c.fail {
 				t.Setenv("CLONES_TEST_GIT_FAIL", "1")
 			}
-			err := c.run()
+			err = c.run()
 			if (err != nil) != c.fail {
 				t.Fatalf("mutation error=%v, want failure=%v", err, c.fail)
 			}
-			if _, ok := loadLocalReposCache("key"); ok {
+			if _, _, ok := loadLocalReposCache("key"); ok {
 				t.Fatal("mutation left a usable old snapshot")
 			}
+			if next, err := readLocalReposEpoch(); err != nil || next != epoch+1 {
+				t.Fatalf("mutation did not bump the cache epoch: %d -> %d (%v)", epoch, next, err)
+			}
 		})
+	}
+}
+
+// TestLocalReposCacheServesStaleSnapshots pins the v1.2.0 serve-stale contract:
+// age is not a miss. However old, a valid snapshot is served instantly, and its
+// age is reported so the caller can decide to refresh in the background.
+func TestLocalReposCacheServesStaleSnapshots(t *testing.T) {
+	isolateLocalCache(t)
+	if err := saveLocalReposCache(0, "key", []Repository{{Name: "old"}}); err != nil {
+		t.Fatal(err)
+	}
+	// Backdate far beyond the refresh threshold.
+	snapshot := getLocalReposTestSnapshot(t)
+	snapshot.SavedAt = time.Now().Add(-2 * time.Hour)
+	putLocalReposTestSnapshot(t, snapshot)
+
+	repos, age, ok := loadLocalReposCache("key")
+	if !ok || len(repos) != 1 || repos[0].Name != "old" {
+		t.Fatalf("stale snapshot was not served: hit=%v repos=%+v", ok, repos)
+	}
+	if age < time.Hour {
+		t.Fatalf("age not reported for the refresh decision: %v", age)
+	}
+}
+
+// TestLocalCacheEpochGuardAbortsStaleSave pins the delete-race protection: a
+// scan that started before an invalidation must not be able to save its
+// (already outdated) results afterwards — deleted repos never resurrect.
+func TestLocalCacheEpochGuardAbortsStaleSave(t *testing.T) {
+	isolateLocalCache(t)
+	if err := saveLocalReposCache(0, "key", []Repository{{Name: "old"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An invalidating op (delete/pull/push/checkout/clone) fires mid-scan.
+	invalidateLocalReposCache()
+
+	// The in-flight scan finishes and tries to persist the state it observed
+	// before the invalidation — the save must be dropped.
+	err := saveLocalReposCache(0, "key", []Repository{{Name: "zombie"}})
+	if !errors.Is(err, errLocalSnapshotEpochAdvanced) {
+		t.Fatalf("want errLocalSnapshotEpochAdvanced, got %v", err)
+	}
+	if _, _, ok := loadLocalReposCache("key"); ok {
+		t.Fatal("stale-epoch save resurrected the invalidated snapshot")
+	}
+
+	// A post-invalidation save under the current epoch succeeds again.
+	if err := saveLocalReposCache(1, "key", []Repository{{Name: "fresh"}}); err != nil {
+		t.Fatalf("save with the current epoch failed: %v", err)
+	}
+}
+
+// TestLocalCacheCLIJQLDBPersistAndBust pins the L2 JQL cache: a cold run hits
+// Atlassian once and persists the result; a later forced rescan (no --no-cache)
+// reuses it; --no-cache busts it and goes live again.
+func TestLocalCacheCLIJQLDBPersistAndBust(t *testing.T) {
+	root := setupLocalCacheCLI(t)
+	makeLocalCacheTestRepo(t, root, "alpha")
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"issues":[{"key":"DEVOPS-123","fields":{"summary":"A ticket","status":{"name":"In Progress"}}}]}`)
+	}))
+	defer server.Close()
+	t.Setenv("JIRA_API_TOKEN", "test-token")
+	t.Setenv("JIRA_BASE_URL", server.URL)
+	configPath := filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "clones", "jira.yml")
+	writeLocalCacheTestFile(t, configPath, "enabled: true\nemail: test@example.com\njql: assignee = currentUser()\n", 0600)
+
+	// Cold run: one live HTTP round trip, JQL result persisted in NutsDB.
+	rows, _ := runLocalCacheCLI(t, "-l")
+	if requests.Load() != 1 || !strings.Contains(rows, "DEVOPS-123") {
+		t.Fatalf("cold Jira labels: requests=%d rows=%q", requests.Load(), rows)
+	}
+
+	// Drop the local snapshot (like a mutation invalidation) so the next run
+	// rescans — without --no-cache it must reuse the persisted JQL result.
+	resetLocalCacheDB(t)
+	if err := deleteSnapshotAndBumpEpoch(); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = runLocalCacheCLI(t, "-l")
+	if requests.Load() != 1 || !strings.Contains(rows, "DEVOPS-123") {
+		t.Fatalf("rescan re-fetched Jira despite persisted JQL: requests=%d rows=%q", requests.Load(), rows)
+	}
+
+	// --no-cache must bust the persisted JQL too and hit the API afresh.
+	resetLocalCacheDB(t)
+	if err := deleteSnapshotAndBumpEpoch(); err != nil {
+		t.Fatal(err)
+	}
+	runLocalCacheCLI(t, "-l", "--no-cache")
+	if requests.Load() != 2 {
+		t.Fatalf("--no-cache did not bust the persisted JQL cache: requests=%d", requests.Load())
 	}
 }

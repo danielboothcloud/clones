@@ -77,11 +77,15 @@ func isBucketExistsErr(err error) bool {
 }
 
 // isNothingStoredErr reports whether err means "no such key or bucket" — nothing
-// was stored, which for snapshot invalidation is success.
+// was stored, which for snapshot invalidation is success. Note nutsdb v1.1.0
+// has THREE same-texted sentinels: a view-tx Get on a never-created bucket
+// returns ErrNotFoundBucket (tx_error.go), distinct from ErrBucketNotFound /
+// ErrBucketNotExist elsewhere — a fresh-DB epoch probe hits exactly that path.
 func isNothingStoredErr(err error) bool {
 	return err != nil && (errors.Is(err, nutsdb.ErrKeyNotFound) ||
 		errors.Is(err, nutsdb.ErrBucketNotFound) ||
-		errors.Is(err, nutsdb.ErrBucketNotExist))
+		errors.Is(err, nutsdb.ErrBucketNotExist) ||
+		errors.Is(err, nutsdb.ErrNotFoundBucket))
 }
 
 func serializeRepo(repo Repository) ([]byte, error) {
