@@ -161,11 +161,34 @@ func getAllBranches(repoPath string) []string {
 	return result
 }
 
-// findLocalRepos walks the configured clone root looking for git repositories
-func findLocalRepos(filter string, ch chan<- Repository) {
+// findLocalRepos serves a recent disk snapshot or scans the configured clone root.
+// Cache hits skip the directory walk, all git subprocesses, and Jira requests.
+func findLocalRepos(filter string, noCache bool, ch chan<- Repository) {
 	jiraConfig, err := loadJiraConfig()
 	if err != nil {
 		jiraConfig = &JiraConfig{}
+	}
+
+	workDir, err := filepath.Abs(getSettings().CloneRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "✗ Could not resolve clone root: %v\n", err)
+		return
+	}
+	cacheKey := localReposCacheKey(workDir, jiraConfig)
+	if !noCache {
+		if repos, ok := loadLocalReposCache(cacheKey); ok {
+			for _, repo := range repos {
+				if matchesFilter(&repo, filter) {
+					ch <- repo
+				}
+			}
+			return
+		}
+	}
+
+	if _, err := os.Stat(workDir); err != nil {
+		fmt.Fprintf(os.Stderr, "✗ Could not access directory %s: %v\n", workDir, err)
+		return
 	}
 
 	// Single JQL call returns key+summary+status for every matching ticket — avoids one
@@ -176,17 +199,12 @@ func findLocalRepos(filter string, ch chan<- Repository) {
 		jql = loadJiraTicketsByJQL(jiraConfig.JQL)
 	}
 
-	workDir := getSettings().CloneRoot
-
-	if _, err := os.Stat(workDir); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "✗ Directory does not exist: %s\n", workDir)
-		return
-	}
-
 	// Phase 1: walk the tree to collect repo paths only — no git subprocesses yet.
 	var repoPaths []string
+	walkFailed := false
 	err = filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
+			walkFailed = true
 			return nil
 		}
 		if info.IsDir() && info.Name() == ".git" {
@@ -196,6 +214,7 @@ func findLocalRepos(filter string, ch chan<- Repository) {
 		return nil
 	})
 	if err != nil {
+		walkFailed = true
 		fmt.Fprintf(os.Stderr, "✗ Error walking directory: %v\n", err)
 	}
 
@@ -215,6 +234,8 @@ func findLocalRepos(filter string, ch chan<- Repository) {
 	}
 	close(jobs)
 
+	var repos []Repository
+	var reposMu sync.Mutex
 	var wg sync.WaitGroup
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
@@ -225,13 +246,26 @@ func findLocalRepos(filter string, ch chan<- Repository) {
 				if !ok {
 					continue
 				}
-				if matchesFilter(&repo, filter) {
-					ch <- repo
-				}
+				reposMu.Lock()
+				repos = append(repos, repo)
+				reposMu.Unlock()
 			}
 		}()
 	}
 	wg.Wait()
+
+	// Persist before offering selections: exiting fzf early must not lose the cache.
+	// Store every repo, not only matches, so changing the filter reuses the snapshot.
+	if !walkFailed {
+		if err := saveLocalReposCache(cacheKey, repos); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save local cache: %v\n", err)
+		}
+	}
+	for _, repo := range repos {
+		if matchesFilter(&repo, filter) {
+			ch <- repo
+		}
+	}
 }
 
 // buildLocalRepo gathers the full Repository state for a single local clone.
@@ -310,13 +344,13 @@ func buildLocalRepo(repoPath, workDir string, jiraConfig *JiraConfig, jql JiraJQ
 }
 
 // browseLocalRepos finds local repositories and lets user select one
-func browseLocalRepos(filter string, platform string) *Repository {
+func browseLocalRepos(filter string, platform string, noCache bool) *Repository {
 	repoChan := make(chan Repository, 100)
 
 	go func() {
 		fetchChan := make(chan Repository, 100)
 		go func() {
-			findLocalRepos(filter, fetchChan)
+			findLocalRepos(filter, noCache, fetchChan)
 			close(fetchChan)
 		}()
 

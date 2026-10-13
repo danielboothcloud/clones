@@ -17,7 +17,7 @@ OPTIONS:
   -r, --remote           Browse only remote repositories (exclude local)
   --platform <name>      Filter by platform: github or gitlab
   --jira                 Show only repos with active Jira tickets
-  --no-cache             Bypass cache and fetch fresh data from APIs
+  --no-cache             Bypass cache and rescan local repos / fetch from APIs
   -h, --help             Show this help message
 
 EXAMPLES:
@@ -29,7 +29,8 @@ EXAMPLES:
   clones -l --platform gitlab   # Only local GitLab repos
   clones --jira                 # Only repos with active Jira tickets
   clones -l --jira              # Only local repos with active Jira tickets
-  clones --no-cache             # Force refresh from APIs (bypass cache)
+  clones -l --no-cache          # Force a fresh local scan
+  clones --no-cache             # Force local scan and API refresh (bypass cache)
 `
 
 // parseArgs uses stdlib flag with two carry-over conventions from the

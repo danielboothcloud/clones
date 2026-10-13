@@ -18,7 +18,7 @@ func main() {
 	}
 
 	if args.LocalMode {
-		selectedRepo := browseLocalRepos(args.Filter, args.Platform)
+		selectedRepo := browseLocalRepos(args.Filter, args.Platform, args.NoCache)
 		if selectedRepo == nil {
 			os.Exit(0)
 		}
@@ -43,40 +43,44 @@ func main() {
 	shouldFetchGitHub := fetchRemote && (args.Platform == "" || args.Platform == "github")
 	shouldFetchGitLab := fetchRemote && (args.Platform == "" || args.Platform == "gitlab")
 
-	// Fetch local repos FIRST (blocking) so they appear before remote repos
-	if fetchLocal {
-		findLocalRepos(args.Filter, fetchChan)
-	}
-
 	if shouldFetchGitHub {
 		wg.Add(1)
-		if args.Filter != "" {
-			go func() {
-				defer wg.Done()
-				searchGitHub(args.Filter, fetchChan)
-			}()
-		} else {
-			go func() {
-				defer wg.Done()
-				fetchGitHub(fetchChan, args.NoCache, true, &cacheWg)
-			}()
-		}
 	}
-
 	if shouldFetchGitLab {
 		wg.Add(1)
-		if args.Filter != "" {
+	}
+
+	go func() {
+		defer close(fetchChan)
+		// Local repos still precede remote repos, but the consumer can drain the
+		// channel immediately (including snapshots larger than its buffer).
+		if fetchLocal {
+			findLocalRepos(args.Filter, args.NoCache, fetchChan)
+		}
+
+		if shouldFetchGitHub {
 			go func() {
 				defer wg.Done()
-				searchGitLab(args.Filter, fetchChan)
-			}()
-		} else {
-			go func() {
-				defer wg.Done()
-				fetchGitLab(fetchChan, args.NoCache, true, &cacheWg)
+				if args.Filter != "" {
+					searchGitHub(args.Filter, fetchChan)
+				} else {
+					fetchGitHub(fetchChan, args.NoCache, true, &cacheWg)
+				}
 			}()
 		}
-	}
+
+		if shouldFetchGitLab {
+			go func() {
+				defer wg.Done()
+				if args.Filter != "" {
+					searchGitLab(args.Filter, fetchChan)
+				} else {
+					fetchGitLab(fetchChan, args.NoCache, true, &cacheWg)
+				}
+			}()
+		}
+		wg.Wait()
+	}()
 
 	// Deduplicate (local beats remote on same owner/name) and stream to fzf in real-time
 	repoChan := make(chan Repository, 500)
@@ -119,11 +123,6 @@ func main() {
 				}
 			}
 		}
-	}()
-
-	go func() {
-		wg.Wait()
-		close(fetchChan)
 	}()
 
 	selectedRepo := selectRepoWithFzf(repoChan)

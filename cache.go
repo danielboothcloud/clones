@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,31 +15,32 @@ import (
 )
 
 const (
-	cacheTTLHours = 24
-	bucketGitHub  = "github_repos"
-	bucketGitLab  = "gitlab_repos"
-	bucketMeta    = "metadata"
+	cacheTTLHours    = 24
+	bucketGitHub     = "github_repos"
+	bucketGitLab     = "gitlab_repos"
+	bucketMeta       = "metadata"
+	bucketLocalRepos = "local_repos"
 )
 
 // Database singleton for repository caching
 var (
-	cacheDB *nutsdb.DB
-	dbOnce  sync.Once
+	cacheDB    *nutsdb.DB
+	cacheDBErr error
+	dbOnce     sync.Once
 )
 
 // getCacheDB opens and returns the NutsDB database (singleton pattern)
 func getCacheDB() (*nutsdb.DB, error) {
-	var dbErr error
 	dbOnce.Do(func() {
 		cacheDir, err := getCacheDir()
 		if err != nil {
-			dbErr = fmt.Errorf("failed to get cache dir: %w", err)
+			cacheDBErr = fmt.Errorf("failed to get cache dir: %w", err)
 			return
 		}
 
 		dbPath := filepath.Join(cacheDir, "db")
 		if err := os.MkdirAll(dbPath, 0755); err != nil {
-			dbErr = fmt.Errorf("failed to create db directory: %w", err)
+			cacheDBErr = fmt.Errorf("failed to create db directory: %w", err)
 			return
 		}
 
@@ -48,12 +50,38 @@ func getCacheDB() (*nutsdb.DB, error) {
 		options.EnableHintFile = true
 		options.EnableMergeV2 = true
 
-		cacheDB, dbErr = nutsdb.Open(options)
-		if dbErr != nil {
-			dbErr = fmt.Errorf("failed to open cache db: %w", dbErr)
+		if db, err := nutsdb.Open(options); err != nil {
+			cacheDBErr = fmt.Errorf("failed to open cache db: %w", err)
+		} else {
+			cacheDB = db
 		}
 	})
-	return cacheDB, dbErr
+	if cacheDBErr != nil && errors.Is(cacheDBErr, nutsdb.ErrDirLocked) {
+		// Another clones process is holding the DB's directory lock. Reset the
+		// failed-open singleton so the NEXT call retries — lock holders usually
+		// exit within seconds — while still reporting the failure to this caller.
+		err := cacheDBErr
+		cacheDB = nil
+		cacheDBErr = nil
+		dbOnce = sync.Once{}
+		return nil, err
+	}
+	return cacheDB, cacheDBErr
+}
+
+// isBucketExistsErr reports whether err is the benign "bucket already exists"
+// returned by NewBucket when the bucket was created in earlier runs.
+func isBucketExistsErr(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "bucket already exists") ||
+		strings.Contains(err.Error(), "already exist"))
+}
+
+// isNothingStoredErr reports whether err means "no such key or bucket" — nothing
+// was stored, which for snapshot invalidation is success.
+func isNothingStoredErr(err error) bool {
+	return err != nil && (errors.Is(err, nutsdb.ErrKeyNotFound) ||
+		errors.Is(err, nutsdb.ErrBucketNotFound) ||
+		errors.Is(err, nutsdb.ErrBucketNotExist))
 }
 
 func serializeRepo(repo Repository) ([]byte, error) {
@@ -129,17 +157,13 @@ func saveReposToDB(platform string, repos []Repository) error {
 		return fmt.Errorf("unknown platform: %s", platform)
 	}
 
-	if err := tx.NewBucket(nutsdb.DataStructureBTree, bucket); err != nil {
-		if !strings.Contains(err.Error(), "bucket already exists") && !strings.Contains(err.Error(), "already exist") {
-			_ = tx.Rollback()
-			return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
-		}
+	if err := tx.NewBucket(nutsdb.DataStructureBTree, bucket); err != nil && !isBucketExistsErr(err) {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to create bucket %s: %w", bucket, err)
 	}
-	if err := tx.NewBucket(nutsdb.DataStructureBTree, bucketMeta); err != nil {
-		if !strings.Contains(err.Error(), "bucket already exists") && !strings.Contains(err.Error(), "already exist") {
-			_ = tx.Rollback()
-			return fmt.Errorf("failed to create bucket %s: %w", bucketMeta, err)
-		}
+	if err := tx.NewBucket(nutsdb.DataStructureBTree, bucketMeta); err != nil && !isBucketExistsErr(err) {
+		_ = tx.Rollback()
+		return fmt.Errorf("failed to create bucket %s: %w", bucketMeta, err)
 	}
 
 	for _, repo := range repos {
