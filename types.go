@@ -29,6 +29,7 @@ type CliArgs struct {
 	Filter     string
 	NoCache    bool // Bypass cache, rescan local repos, and fetch fresh data from APIs
 	JiraFilter bool // Filter repos with active Jira tickets
+	Version    bool // -v / --version: print embedded VERSION and exit
 }
 
 // Config holds user configuration for excluding repositories

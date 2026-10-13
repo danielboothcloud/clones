@@ -30,4 +30,4 @@ go.work
 .DS_Store
 
 # Binary output
-clone-tool
+clones

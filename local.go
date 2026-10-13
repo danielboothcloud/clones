@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -161,8 +164,73 @@ func getAllBranches(repoPath string) []string {
 	return result
 }
 
-// findLocalRepos serves a recent disk snapshot or scans the configured clone root.
-// Cache hits skip the directory walk, all git subprocesses, and Jira requests.
+// skipScanDirNames lists directory names the repo scan never descends into.
+// Inside repos these are unreachable anyway (a repo is a leaf — collectRepoPaths
+// skips its whole subtree); the list guards against bulky non-repo trees hanging
+// in the clone root (a stray node_modules, venv, or build dir with no repo above
+// it). Hidden directories are deliberately NOT skipped wholesale — they were
+// walked before v1.2.0, and .archive/…-style roots should keep working.
+var skipScanDirNames = map[string]bool{
+	"node_modules": true,
+	"__pycache__":  true,
+	".terraform":   true,
+	".venv":        true,
+	"venv":         true,
+	"target":       true,
+	".cache":       true,
+	".next":        true,
+	"build":        true,
+	"dist":         true,
+	"Pods":         true,
+}
+
+// collectRepoPaths leaf-walks workDir and returns every directory that directly
+// contains a .git/ subdirectory. walkFailed is true when any entry error was
+// hit — callers must not persist a snapshot in that case (pre-v1.2.0 contract).
+//
+// Repos are leaves: finding .git/ terminates descent into that directory, so
+// repo guts (node_modules, build output) are always skipped and repos nested
+// inside other repos' subtrees are not collected. Group directories (no .git)
+// keep descending, so nested GitLab layouts like work/a/b/c/repo still resolve.
+// On a real clone root this cut the scan from ~62k directories (13.6s) to a few
+// hundred (~12ms).
+func collectRepoPaths(workDir string) (repos []string, walkFailed bool) {
+	walkFailed = false
+	err := filepath.WalkDir(workDir, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			walkFailed = true
+			fmt.Fprintf(os.Stderr, "✗ Local scan could not read %s: %v\n", path, walkErr)
+			return nil
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path != workDir && skipScanDirNames[d.Name()] {
+			return filepath.SkipDir
+		}
+		if hasGitDir(path) {
+			repos = append(repos, path)
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return repos, walkFailed || err != nil
+}
+
+// hasGitDir reports whether dir itself contains a .git directory. A .git *file*
+// (git worktrees, submodules) is deliberately not treated as a repo — the
+// pre-v1.2.0 walk only matched real .git directories, and that parity is kept.
+func hasGitDir(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".git"))
+	return err == nil && info.IsDir()
+}
+
+// findLocalRepos serves the local snapshot instantly whenever one exists,
+// regardless of age (serve-stale). When the served snapshot is older than
+// localCacheRefreshThreshold it also starts a background refresh for the NEXT
+// run — the open fzf session always stays static. First-ever runs and
+// --no-cache scan synchronously. Cache hits skip the directory walk, all git
+// subprocesses, and Jira requests entirely.
 func findLocalRepos(filter string, noCache bool, ch chan<- Repository) {
 	jiraConfig, err := loadJiraConfig()
 	if err != nil {
@@ -176,7 +244,15 @@ func findLocalRepos(filter string, noCache bool, ch chan<- Repository) {
 	}
 	cacheKey := localReposCacheKey(workDir, jiraConfig)
 	if !noCache {
-		if repos, ok := loadLocalReposCache(cacheKey); ok {
+		if repos, age, ok := loadLocalReposCache(cacheKey); ok {
+			// Register the refresh BEFORE serving any row: a consumer could
+			// react to a served row (select, exit) and reach waitForLocalRefresh,
+			// and the WaitGroup Add must strictly precede every Wait.
+			if age >= localCacheRefreshThreshold {
+				registerLocalRefresh(func() {
+					refreshLocalSnapshot(workDir, jiraConfig, cacheKey)
+				})
+			}
 			for _, repo := range repos {
 				if matchesFilter(&repo, filter) {
 					ch <- repo
@@ -191,32 +267,65 @@ func findLocalRepos(filter string, noCache bool, ch chan<- Repository) {
 		return
 	}
 
+	repos, walkFailed := scanLocalRepos(workDir, jiraConfig, noCache)
+
+	// Persist before offering selections: exiting fzf early must not lose the
+	// cache. Store every repo, not only matches, so changing the filter reuses
+	// the snapshot. The epoch guard may drop the save if an invalidating op
+	// won the race — never persist a stale world.
+	if !walkFailed {
+		epoch, epochErr := readLocalReposEpoch()
+		if epochErr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not open cache db to save snapshot: %v\n", epochErr)
+		} else if err := saveLocalReposCache(epoch, cacheKey, repos); err != nil && !errors.Is(err, errLocalSnapshotEpochAdvanced) {
+			fmt.Fprintf(os.Stderr, "Warning: failed to save local cache: %v\n", err)
+		}
+	}
+	for _, repo := range repos {
+		if matchesFilter(&repo, filter) {
+			ch <- repo
+		}
+	}
+}
+
+// refreshLocalSnapshot rescans in the background and replaces the stored
+// snapshot for the NEXT run; it never touches the interactive session that
+// started it. The save is epoch-guarded: an invalidating operation during the
+// scan voids the result (a delete cannot resurrect a repo). The refresh runs
+// with caches enabled — it is exactly the mechanism that keeps future runs
+// fast, so it reuses the persisted JQL result.
+func refreshLocalSnapshot(workDir string, jiraConfig *JiraConfig, cacheKey string) {
+	epoch, err := readLocalReposEpoch()
+	if err != nil {
+		// DB locked or unopenable: nothing to save under anyway. Next run retries.
+		return
+	}
+	repos, walkFailed := scanLocalRepos(workDir, jiraConfig, false)
+	if walkFailed {
+		return
+	}
+	if err := saveLocalReposCache(epoch, cacheKey, repos); err != nil && !errors.Is(err, errLocalSnapshotEpochAdvanced) {
+		fmt.Fprintf(os.Stderr, "Warning: failed to save local cache: %v\n", err)
+	}
+}
+
+// scanLocalRepos gathers full repo state for the whole clone root: one JQL
+// call plus a bounded worker pool running the per-repo git subprocesses.
+// noCache flows through to the JQL lookup (L1+L2 bypass + live fetch). The
+// bool result is walkFailed — callers must not persist a snapshot then.
+func scanLocalRepos(workDir string, jiraConfig *JiraConfig, noCache bool) ([]Repository, bool) {
 	// Single JQL call returns key+summary+status for every matching ticket — avoids one
 	// extra HTTP call per repo. When JQL is unconfigured, jql.OK is false and we fall back
 	// to per-ticket fetchJiraTicket below.
 	var jql JiraJQLResult
 	if jiraConfig.Enabled && jiraConfig.JQL != "" {
-		jql = loadJiraTicketsByJQL(jiraConfig.JQL)
+		jql = loadJiraTicketsByJQL(jiraConfig.JQL, noCache)
 	}
 
-	// Phase 1: walk the tree to collect repo paths only — no git subprocesses yet.
-	var repoPaths []string
-	walkFailed := false
-	err = filepath.Walk(workDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			walkFailed = true
-			return nil
-		}
-		if info.IsDir() && info.Name() == ".git" {
-			repoPaths = append(repoPaths, filepath.Dir(path))
-			return filepath.SkipDir
-		}
-		return nil
-	})
-	if err != nil {
-		walkFailed = true
-		fmt.Fprintf(os.Stderr, "✗ Error walking directory: %v\n", err)
-	}
+	// Phase 1 (leaf-walk): collect repo paths only — no git subprocesses yet.
+	// collectRepoPaths treats any directory containing .git as a leaf; this
+	// replaces v1.2.0's full descent into every repo's contents.
+	repoPaths, walkFailed := collectRepoPaths(workDir)
 
 	// Phase 2: fan-out per-repo work (5+ git subprocesses each) to a bounded worker pool.
 	// Capped to avoid fd exhaustion on macOS (default soft limit is often 256).
@@ -254,18 +363,10 @@ func findLocalRepos(filter string, noCache bool, ch chan<- Repository) {
 	}
 	wg.Wait()
 
-	// Persist before offering selections: exiting fzf early must not lose the cache.
-	// Store every repo, not only matches, so changing the filter reuses the snapshot.
-	if !walkFailed {
-		if err := saveLocalReposCache(cacheKey, repos); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to save local cache: %v\n", err)
-		}
-	}
-	for _, repo := range repos {
-		if matchesFilter(&repo, filter) {
-			ch <- repo
-		}
-	}
+	// Deterministic listing order — worker completion order varies run to run.
+	sort.Slice(repos, func(i, j int) bool { return repos[i].LocalPath < repos[j].LocalPath })
+
+	return repos, walkFailed
 }
 
 // buildLocalRepo gathers the full Repository state for a single local clone.
